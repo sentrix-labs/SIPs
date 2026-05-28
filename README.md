@@ -48,8 +48,9 @@ Skip a SIP for:
 | SIP | Title | Status | Type |
 |---|---|---|---|
 | [SIP-1](sips/sip-1.md) | SIP Process | Final | Process |
-
-(More SIPs will land here as the process is exercised.)
+| [SIP-2](sips/sip-2.md) | Voyager DPoS + BFT consensus activation | Final | Standards Track (Core) |
+| [SIP-3](sips/sip-3.md) | Tokenomics v2 — 315M cap and 4-year halving | Final | Standards Track (Core) |
+| [SIP-4](sips/sip-4.md) | Reward distribution v2 — treasury escrow and ClaimRewards | Final | Standards Track (Core) |
 
 ## Reference orgs
 
