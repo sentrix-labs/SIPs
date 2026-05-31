@@ -82,21 +82,52 @@ The proposal carries `block_hash=H2`. Engine tracks `H2`. Justification refers t
 In `BftMessage::Propose` handler at main.rs L2540+, after deserializing the proposed Block:
 
 ```rust
-// Verify proposer's state_root claim
+// 1. Verify proposer's block.hash claim before any state work.
+//    Recompute hash from received fields; reject if proposer's claim
+//    diverges. This closes the Bug C class at the spec level —
+//    validators MUST NOT trust the wire-level block.hash without
+//    locally recomputing.
+let local_computed_hash = block.calculate_hash();
+if local_computed_hash != block.hash {
+    tracing::warn!(
+        claimed = %hex(block.hash),
+        local = %hex(local_computed_hash),
+        "proposer block.hash claim diverges from local recomputation — rejecting"
+    );
+    return;  // don't prevote
+}
+
+// 2. Verify proposer's state_root claim. Missing state_root is a
+//    protocol violation post-fork; reject rather than unwrap.
+let claimed_root = match block.state_root {
+    Some(r) => r,
+    None => {
+        tracing::warn!("post-fork block missing state_root — rejecting");
+        return;
+    }
+};
 let local_computed_root = bc_read.speculative_apply_for_state_root(&block)?;
-let claimed_root = block.state_root.ok_or(/* reject */)?;
 if local_computed_root != claimed_root {
     tracing::warn!("proposer state_root claim diverges from local — rejecting");
     return;  // don't prevote
 }
-// state_root agreed → safe to prevote on this hash (= H2)
+// hash + state_root agreed → safe to prevote on H2.
 ```
 
-If `speculative_apply_for_state_root` returns different result on validator vs proposer, the proposal is rejected. Cluster won't reach supermajority on a block with disputed state_root.
+If `block.calculate_hash()` or `speculative_apply_for_state_root` returns different result on validator vs proposer, the proposal is rejected. Cluster won't reach supermajority on a block with disputed hash or state_root.
 
 #### add_block_impl changes
 
-Remove the `last.state_root = Some(computed_root); last.hash = last.calculate_hash()` recompute at L1561-1563 (and sibling sites L1608, L1649, L1654 if similar). The block already has `state_root=Some(R)` and `hash=H2` set by the proposer; `add_block` only verifies `computed_root == block.state_root.unwrap()` and rejects on mismatch.
+Remove the `last.state_root = Some(computed_root); last.hash = last.calculate_hash()` recompute at L1561-1563 (and sibling sites L1608, L1649, L1654 if similar). The block already has `state_root=Some(R)` and `hash=H2` set by the proposer. `add_block` validates without `unwrap`:
+
+```rust
+let claimed_root = block.state_root.ok_or(BlockError::MissingStateRoot)?;
+if computed_root != claimed_root {
+    return Err(BlockError::StateRootMismatch { computed: computed_root, claimed: claimed_root });
+}
+```
+
+Missing `state_root` on a post-fork block is a protocol violation and rejected; mismatch is also rejected. No `unwrap` in the normative path.
 
 #### Engine changes
 
@@ -113,6 +144,14 @@ None directly — engine still tracks whatever hash the proposer broadcast. The 
 Fork-gated by new height `BLOCK_HASH_WITH_REAL_STATE_ROOT_HEIGHT`:
 - Mainnet default: `u64::MAX` (disabled, pending operator activation window)
 - Testnet default: `<current_height + 50_000>` at SIP merge time
+
+**Activation predicate (canonical, used everywhere in this SIP):**
+
+```
+is_post_fork(block) := block.height >= BLOCK_HASH_WITH_REAL_STATE_ROOT_HEIGHT
+```
+
+The boundary is **`>=`** (inclusive), not `>`. The exact block at the fork height is the FIRST post-fork block. All references in this SIP to "pre-fork" mean `block.height < BLOCK_HASH_WITH_REAL_STATE_ROOT_HEIGHT`; "post-fork" means `block.height >= BLOCK_HASH_WITH_REAL_STATE_ROOT_HEIGHT`. Implementation MUST use this single predicate in every gated branch (proposer flow, validator flow, `add_block_impl`) to prevent off-by-one consensus splits.
 
 Pre-fork blocks: proposer doesn't pre-apply, hash stays at `H1`-with-placeholder, recompute step at L1563 still runs → legacy behavior preserved bit-identically.
 
@@ -176,7 +215,7 @@ Justification refs match block.hash post-fork. Strict_justification fork can the
 
 To be filled in by implementation PR. Skeleton:
 
-- New API: `Blockchain::speculative_apply_for_state_root(&block) -> SentrixResult<[u8; 32]>` that clones the trie + applies block tx's + returns root WITHOUT mutating chain state. Cleanup must release the cloned trie immediately to bound memory.
+- New API: `Blockchain::speculative_apply_for_state_root(&block) -> SentrixResult<[u8; 32]>` that clones the trie + applies block txs + returns root WITHOUT mutating chain state. Cleanup must release the cloned trie immediately to bound memory.
 - New fork: `BLOCK_HASH_WITH_REAL_STATE_ROOT_HEIGHT` in `crates/sentrix-core/src/fork_heights.rs`
 - Proposer path in `bin/sentrix/src/main.rs` ProposeBlock + skip-round arms: call speculative apply, set `block.state_root` and recompute `block.hash` before broadcasting Proposal
 - Validator path: in `BftMessage::Propose` handler, verify proposer's claimed `state_root` matches local speculative apply
